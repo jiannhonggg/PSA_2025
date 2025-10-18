@@ -36,8 +36,8 @@ class JobPlanner:
         self._qc_load_ema: Dict[str, float] = defaultdict(float)
         self._active_profile: Dict[str, object] = {
             "distance_weights": {
-                "DI_QC": 2.10,
-                "DI_YARD": 0.02,
+                "DI_QC": 0.80,
+                "DI_YARD": 1.20,
                 "LO_QC": 0.11,
                 "LO_YARD": 1.50,
             },
@@ -55,6 +55,7 @@ class JobPlanner:
             "yard_ema_beta": 0.7,
             "qc_ema_beta": 3.4,
             "ema_alpha": 0.44,
+            "yard_idle_bonus": 0.8,
         }
 
     def is_deadlock(self):
@@ -190,6 +191,7 @@ class JobPlanner:
         QC_LOAD_BETA = active_profile["qc_load_beta"]
         YARD_EMA_BETA = active_profile["yard_ema_beta"]
         QC_EMA_BETA = active_profile["qc_ema_beta"]
+        YARD_IDLE_BONUS = float(active_profile.get("yard_idle_bonus", 0.0))
 
         remaining_hts_set = set(plannable_HTs)
         remaining_jobs_set = set(jd["idx"] for jd in jobs_data)
@@ -250,10 +252,20 @@ class JobPlanner:
                                 self._qc_load_ema, qc_name, qc_loads.get(qc_name, 0), ema_alpha
                             )
 
-                        score += yard_loads.get(y, 0) * YARD_LOAD_BETA
+                        # Yard/QC load influences
+                        y_load = yard_loads.get(y, 0)
+                        q_load = qc_loads.get(qc_name, 0)
+                        score += y_load * YARD_LOAD_BETA
                         score += smoothed_yard_loads[y] * YARD_EMA_BETA
                         score += qc_loads.get(qc_name, 0) * QC_LOAD_BETA
                         score += smoothed_qc_loads[qc_name] * QC_EMA_BETA
+
+                        # Encourage sending HTs to idle/less-busy yards so yards are always doing something
+                        # Apply a small bonus (negative score) when yard has low immediate load
+                        if y_load == 0:
+                            score -= YARD_IDLE_BONUS
+                        elif y_load == 1:
+                            score -= YARD_IDLE_BONUS * 0.5
 
                         score = self._round_score(score)
 
@@ -624,26 +636,47 @@ class JobPlanner:
         """
         yard_in_coord = self.sector_map_snapshot.get_yard_sector(yard_name).in_coord
 
-        # Go North to take QC travel lane (y=5), then go to right boundary
-        path = [Coordinate(buffer_coord.x, buffer_coord.y - 1)]
-        qc_lane_y = 5
-        path.extend(
-            [Coordinate(x, qc_lane_y) for x in range(buffer_coord.x + 1, 43, 1)]
-        )
+        path: List[Coordinate] = []
+        # Step 1: From Buffer (y=6) move down into Highway Left (y=7)
+        if buffer_coord.y < 7:
+            for y in range(buffer_coord.y + 1, 8):
+                path.append(Coordinate(buffer_coord.x, y))
+        elif buffer_coord.y > 7:
+            for y in range(buffer_coord.y - 1, 6, -1):
+                path.append(Coordinate(buffer_coord.x, y))
 
-        # go down to Highway Left lane(11), then takes left most
-        down_path_x = 42
-        path.extend([Coordinate(down_path_x, y) for y in range(6, 12, 1)])
-        highway_lane_y = 11
-        path.extend([Coordinate(x, highway_lane_y) for x in range(41, 0, -1)])
+        curr_x = path[-1].x if path else buffer_coord.x
+        target_x = yard_in_coord.x
 
-        # go to lower boundary, then navigate to Yard[IN]
-        highway_lane_y = 12
-        path.append(Coordinate(1, highway_lane_y))
-        path.extend(
-            [Coordinate(x, highway_lane_y) for x in range(2, yard_in_coord.x + 1, 1)]
-        )
-        path.append(yard_in_coord)
+        # Step 2: Minimal horizontal on appropriate highway lane
+        if target_x > curr_x:
+            # Need to move right: go to Highway Right (y=8), then move right
+            if not path or path[-1].y != 8:
+                path.append(Coordinate(curr_x, 8))
+            for x in range(curr_x + 1, target_x + 1):
+                path.append(Coordinate(x, 8))
+            current_y = 8
+        elif target_x < curr_x:
+            # Need to move left: stay on Highway Left (y=7) and move left
+            if not path or path[-1].y != 7:
+                path.append(Coordinate(curr_x, 7))
+            for x in range(curr_x - 1, target_x - 1, -1):
+                path.append(Coordinate(x, 7))
+            current_y = 7
+        else:
+            # Already aligned on x
+            current_y = path[-1].y if path else buffer_coord.y
+
+        # Step 3: Go straight down to Yard IN at target_x
+        if current_y < yard_in_coord.y:
+            for y in range(current_y + 1, yard_in_coord.y + 1):
+                path.append(Coordinate(target_x, y))
+        elif current_y > yard_in_coord.y:
+            for y in range(current_y - 1, yard_in_coord.y - 1, -1):
+                path.append(Coordinate(target_x, y))
+
+        if path[-1] != yard_in_coord:
+            path.append(yard_in_coord)
 
         return path
 
