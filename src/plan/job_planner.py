@@ -36,26 +36,26 @@ class JobPlanner:
         self._qc_load_ema: Dict[str, float] = defaultdict(float)
         self._active_profile: Dict[str, object] = {
             "distance_weights": {
-                "DI_QC": 0.80,
-                "DI_YARD": 1.20,
-                "LO_QC": 0.11,
-                "LO_YARD": 1.50,
+                "DI_QC": 0.05,
+                "DI_YARD": 4.0,
+                "LO_QC": 0.001,
+                "LO_YARD": 4.5,
             },
-            "left_penalty": 1.0,
-            "left_threshold": 4,
-            "recent_window": 4,
-            "recent_beta": 0.9,
-            "tick_beta": 1.8,
-            "qc_tick_beta": 2.6,
+            "left_penalty": 0.1,
+            "left_threshold": 10,
+            "recent_window": 15,
+            "recent_beta": 3.5,
+            "tick_beta": 8.0,
+            "qc_tick_beta": 12.0,
             "qc_tick_cap": 0,
-            "yard_tick_power": 1.0,
-            "qc_tick_power": 2.3,
-            "yard_load_beta": 2.2,
-            "qc_load_beta": 3.6,
-            "yard_ema_beta": 0.7,
-            "qc_ema_beta": 3.4,
-            "ema_alpha": 0.44,
-            "yard_idle_bonus": 0.8,
+            "yard_tick_power": 0.3,
+            "qc_tick_power": 8.0,
+            "yard_load_beta": 8.0,
+            "qc_load_beta": 15.0,
+            "yard_ema_beta": 3.5,
+            "qc_ema_beta": 15.0,
+            "ema_alpha": 0.90,
+            "yard_idle_bonus": 2.0,
         }
 
     def is_deadlock(self):
@@ -231,10 +231,9 @@ class JobPlanner:
                             score = DI_QC_W * d_qc + DI_YARD_W * d_yard
                         else:
                             score = LO_QC_W * d_qc + LO_YARD_W * d_yard
-
                         if x < LEFT_PENALTY_X:
                             score += LEFT_PENALTY
-
+                        
                         last_used = self._yard_last_used.get(y, -10**9)
                         gap = self._plan_iter - last_used
                         if gap <= RECENT_WINDOW:
@@ -252,16 +251,12 @@ class JobPlanner:
                                 self._qc_load_ema, qc_name, qc_loads.get(qc_name, 0), ema_alpha
                             )
 
-                        # Yard/QC load influences
                         y_load = yard_loads.get(y, 0)
-                        q_load = qc_loads.get(qc_name, 0)
                         score += y_load * YARD_LOAD_BETA
                         score += smoothed_yard_loads[y] * YARD_EMA_BETA
                         score += qc_loads.get(qc_name, 0) * QC_LOAD_BETA
                         score += smoothed_qc_loads[qc_name] * QC_EMA_BETA
 
-                        # Encourage sending HTs to idle/less-busy yards so yards are always doing something
-                        # Apply a small bonus (negative score) when yard has low immediate load
                         if y_load == 0:
                             score -= YARD_IDLE_BONUS
                         elif y_load == 1:
@@ -594,16 +589,13 @@ class JobPlanner:
         """
         QC_in_coord = self.sector_map_snapshot.get_QC_sector(QC_name).in_coord
 
-        # go South to take Highway Left lane (y=7)
         highway_lane_y = 7
         path = [Coordinate(buffer_coord.x, highway_lane_y)]
 
-        # then go to the left boundary
         path.extend(
             [Coordinate(x, highway_lane_y) for x in range(buffer_coord.x - 1, 0, -1)]
         )
 
-        # then go to upper boundary and navigate to QC_in
         up_path_x = 1
         path.extend([Coordinate(up_path_x, y) for y in range(6, 3, -1)])
         qc_travel_lane_y = 4
@@ -745,21 +737,17 @@ class JobPlanner:
         """
         QC_out_coord = self.sector_map_snapshot.get_QC_sector(QC_name).out_coord
 
-        # go to QC_out first
         path = [QC_out_coord]
 
-        # go South to take QC Travel Lane all the way to right boundary
         qc_travel_lane_y = 4
         path.append(Coordinate(QC_out_coord.x, qc_travel_lane_y))
         path.extend(
             [Coordinate(x, qc_travel_lane_y) for x in range(QC_out_coord.x + 1, 43, 1)]
         )
 
-        # go down to Highway Left lane(7), then takes left most
         down_path_x = 42
         path.extend([Coordinate(down_path_x, y) for y in range(5, 8, 1)])
 
-        # navigate back to buffer
         highway_lane_y = 7
         path.extend(
             [Coordinate(x, highway_lane_y) for x in range(41, buffer_coord.x - 1, -1)]
