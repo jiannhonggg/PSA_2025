@@ -647,24 +647,7 @@ class JobPlanner:
     def get_path_from_buffer_to_yard(
         self, buffer_coord: Coordinate, yard_name: str
     ) -> List[Coordinate]:
-        """
-        Generates a path from a buffer location to a yard IN area's coordinate.
 
-        The path follows a specific route:
-        1. Moves north to the QC travel lane (y = 5).
-        2. Travels east to the right boundary of the sector (x = 42).
-        3. Moves south to the Highway Left lane (y = 11).
-        4. Travels west along the highway to the left boundary (x = 1).
-        5. Moves south to the lower boundary (y = 12).
-        6. Travels east to the IN coordinate of the specified yard.
-
-        Args:
-            buffer_coord (Coordinate): The starting coordinate in the buffer zone.
-            yard_name (str): The name of the yard to which the path should lead.
-
-        Returns:
-            List[Coordinate]: A list of coordinates representing the path from the buffer to the yard.
-        """
         yard_in_coord = self.sector_map_snapshot.get_yard_sector(yard_name).in_coord
 
         path: List[Coordinate] = []
@@ -680,13 +663,47 @@ class JobPlanner:
         target_x = yard_in_coord.x
 
         # Step 2: Minimal horizontal on appropriate highway lane
+        # if target_x > curr_x:
+        #     # Need to move right: go to Highway Right (y=8), then move right
+        #     if not path or path[-1].y != 8:
+        #         path.append(Coordinate(curr_x, 8))
+        #     for x in range(curr_x + 1, target_x + 1):
+        #         path.append(Coordinate(x, 8))
+        #     current_y = 8
+
+        #     # Step 3: Go straight down to Yard IN at target_x
+        #     if current_y < yard_in_coord.y:
+        #         for y in range(current_y + 1, yard_in_coord.y + 1):
+        #             path.append(Coordinate(target_x, y))
+        #     elif current_y > yard_in_coord.y:
+        #         for y in range(current_y - 1, yard_in_coord.y - 1, -1):
+        #             path.append(Coordinate(target_x, y))
+
+        # Changed the Go Left or right, now we do all left. 
         if target_x > curr_x:
-            # Need to move right: go to Highway Right (y=8), then move right
-            if not path or path[-1].y != 8:
-                path.append(Coordinate(curr_x, 8))
-            for x in range(curr_x + 1, target_x + 1):
-                path.append(Coordinate(x, 8))
-            current_y = 8
+            # --- NEW: Simplified path to go left and then down ---
+
+            # 1. Travel LEFT along y=7 until you reach x=1
+            go_left_y = 7
+            go_down_x = 1
+            for x in range(curr_x - 1, go_down_x - 1, -1):
+                path.append(Coordinate(x, go_left_y))
+
+            # 2. (Assuming it goes down to y=12 based on previous logic)
+            end_y = 12
+            for y in range(go_left_y + 1, end_y + 1):
+                path.append(Coordinate(go_down_x, y)) 
+            
+            # Travel Right Along this expressway and return to x_coor of Yard In.
+            highway_lane_y = 12
+
+            path.extend(
+                [Coordinate(x, highway_lane_y) for x in range(2, yard_in_coord.x + 1, 1)]
+            )
+            path.append(yard_in_coord)
+
+        # -------------------------------------------------------------
+
         elif target_x < curr_x:
             # Need to move left: stay on Highway Left (y=7) and move left
             if not path or path[-1].y != 7:
@@ -694,17 +711,26 @@ class JobPlanner:
             for x in range(curr_x - 1, target_x - 1, -1):
                 path.append(Coordinate(x, 7))
             current_y = 7
+            
+            # Step 3: Go straight down to Yard IN at target_x
+            if current_y < yard_in_coord.y:
+                for y in range(current_y + 1, yard_in_coord.y + 1):
+                    path.append(Coordinate(target_x, y))
+            elif current_y > yard_in_coord.y:
+                for y in range(current_y - 1, yard_in_coord.y - 1, -1):
+                    path.append(Coordinate(target_x, y))
+
         else:
             # Already aligned on x
             current_y = path[-1].y if path else buffer_coord.y
 
-        # Step 3: Go straight down to Yard IN at target_x
-        if current_y < yard_in_coord.y:
-            for y in range(current_y + 1, yard_in_coord.y + 1):
-                path.append(Coordinate(target_x, y))
-        elif current_y > yard_in_coord.y:
-            for y in range(current_y - 1, yard_in_coord.y - 1, -1):
-                path.append(Coordinate(target_x, y))
+            # Step 3: Go straight down to Yard IN at target_x
+            if current_y < yard_in_coord.y:
+                for y in range(current_y + 1, yard_in_coord.y + 1):
+                    path.append(Coordinate(target_x, y))
+            elif current_y > yard_in_coord.y:
+                for y in range(current_y - 1, yard_in_coord.y - 1, -1):
+                    path.append(Coordinate(target_x, y))
 
         if path[-1] != yard_in_coord:
             path.append(yard_in_coord)
@@ -736,22 +762,37 @@ class JobPlanner:
         # go to Yard[OUT] first
         path = [yard_out_coord]
 
-        # enter highway lane, go to tile second-to-right boundary
-        highway_lane_y = 12
+        if buffer_coord.x <= yard_out_coord.x: 
+            # SCENARIO 1 : Buffer to the left of our yard. Direct Path.
+            highway_y = 7 
+            # Enter Y = 7 by moving upwards. 
+            for y in range(yard_out_coord.y - 1, highway_y - 1, -1):
+                path.append(Coordinate(yard_out_coord.x, y))
 
-        path.extend(
-            [Coordinate(x, highway_lane_y) for x in range(yard_out_coord.x, 42, 1)]
-        )
+            # Moves in the left lane. 
+            path.extend(
+                [Coordinate(x, highway_y) for x in range(yard_out_coord.x - 1, buffer_coord.x - 1, -1)]
+            )
 
-        # go to Highway Left lane (7)
-        up_path_x = 41
-        path.extend([Coordinate(up_path_x, y) for y in range(11, 6, -1)])
+        else : 
 
-        # navigate back to original buffer
-        highway_lane_y = 7
-        path.extend(
-            [Coordinate(x, highway_lane_y) for x in range(40, buffer_coord.x - 1, -1)]
-        )
+            # enter highway lane, go to tile second-to-right boundary
+            highway_lane_y = 12
+
+            path.extend(
+                [Coordinate(x, highway_lane_y) for x in range(yard_out_coord.x, 42, 1)]
+            )
+
+            # go to Highway Left lane (7)
+            up_path_x = 41
+            path.extend([Coordinate(up_path_x, y) for y in range(11, 6, -1)])
+
+            # navigate back to original buffer
+            highway_lane_y = 7
+            path.extend(
+                [Coordinate(x, highway_lane_y) for x in range(40, buffer_coord.x - 1, -1)]
+            )
+
         path.append(buffer_coord)
 
         return path
