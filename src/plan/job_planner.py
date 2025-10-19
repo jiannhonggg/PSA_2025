@@ -22,6 +22,19 @@ class JobPlanner:
         A snapshot of the sector map representing the current state of the environment for planning.
     """
 
+ # BASE WITH ROUTE 
+class JobPlanner:
+    """
+    Coordinates job planning activities using HT tracker and sector map data.
+
+    Attributes
+    ----------
+    ht_coord_tracker : HT_Coordinate_View
+        An instance responsible for tracking the coordinates of HTs.
+    sector_map_snapshot : SectorMapSnapshot
+        A snapshot of the sector map representing the current state of the environment for planning.
+    """
+
     def __init__(
         self,
         ht_coord_tracker: HT_Coordinate_View,
@@ -46,7 +59,7 @@ class JobPlanner:
         get_path_from_buffer_to_yard():
         get_path_from_yard_to_buffer():
         get_path_from_QC_to_buffer():
-            generate an efficient path for HT to navigate between listed locations (QC, yard, buffer).        
+        generate an efficient path for HT to navigate between listed locations (QC, yard, buffer).        
     """
 
     def plan(self, job_tracker: JobTracker) -> List[Job]:
@@ -242,7 +255,6 @@ class JobPlanner:
 
         return new_jobs
 
-    # HT ASSIGNMENT LOGIC
     def select_HT(self, job_type: str, selected_HT_names: List[str]) -> str:
         """
         Selects an available HT (Horizontal Transport) based on the job type and a list of already selected HTs.
@@ -325,9 +337,8 @@ class JobPlanner:
             
             # Move vertically down to Y=4
             path.append(Coordinate(curr_x, qc_travel_lane_y))
-        else:
-            # SCENARIO: QC is to the West (Left) and requires the original down-loop.
-            
+        
+        else:            
             # 1. Moves south to the highway left lane (y = 7).
             highway_lane_y = 7
             path = [Coordinate(buffer_coord.x, highway_lane_y)]
@@ -373,29 +384,38 @@ class JobPlanner:
         curr_x = path[-1].x if path else buffer_coord.x
         target_x = yard_in_coord.x
 
-        # Changed the Go Left or right, now we do all left. 
+        # Conditional Optimization Stratergy. 
         if target_x > curr_x:
             # --- NEW: Simplified path to go left and then down ---
+            QC_IN_LANES = [2, 4, 7, 9, 12, 14, 17, 19, 22, 24, 27, 29, 32, 34, 37, 39]
+            highway_lane_y = 7 # Define the y-level for leftward travel
+            # 1. Find the closest available down-lane to the left            
+            start_x = buffer_coord.x
+            available_lanes = [x for x in QC_IN_LANES if x < start_x]
+            turn_x = max(available_lanes) if available_lanes else 1
 
-            # 1. Travel LEFT along y=7 until you reach x=1
-            go_left_y = 7
-            go_down_x = 1
-            for x in range(curr_x - 1, go_down_x - 1, -1):
-                path.append(Coordinate(x, go_left_y))
-
-            # 2. (Assuming it goes down to y=12 based on previous logic)
-            end_y = 12
-            for y in range(go_left_y + 1, end_y + 1):
-                path.append(Coordinate(go_down_x, y)) 
-            
-            # Travel Right Along this expressway and return to x_coor of Yard In.
-            highway_lane_y = 12
-
+            # 2. Travels west along the highway to the chosen 'turn_x'
             path.extend(
-                [Coordinate(x, highway_lane_y) for x in range(2, yard_in_coord.x + 1, 1)]
+                [Coordinate(x, highway_lane_y) for x in range(start_x - 1, turn_x - 1, -1)]
             )
-            path.append(yard_in_coord)
 
+            # 3. Travel down at "turn x"
+            expressway_y = 12
+            for y in range(highway_lane_y + 1, expressway_y + 1):
+                path.append(Coordinate(turn_x, y))
+
+            # 4. FIX: Travel east (right) from 'turn_x' to the target x-coordinate
+            for x in range(turn_x + 1, target_x + 1):
+                path.append(Coordinate(x, expressway_y))
+
+            # 5. FIX: Add the final vertical move from the expressway to the yard
+            current_y = expressway_y
+            if current_y < yard_in_coord.y:
+                for y in range(current_y + 1, yard_in_coord.y + 1):
+                    path.append(Coordinate(target_x, y))
+            elif current_y > yard_in_coord.y:
+                for y in range(current_y - 1, yard_in_coord.y - 1, -1):
+                    path.append(Coordinate(target_x, y))
         # -------------------------------------------------------------
 
         elif target_x < curr_x:
@@ -435,26 +455,12 @@ class JobPlanner:
         self, yard_name: str, buffer_coord: Coordinate
     ) -> List[Coordinate]:
         
-        """
-        Generates a path from a yard OUT area's coordinate to a buffer location.
-
-        The path follows this route:
-        1. Starts at the yard OUT coordinate.
-        2. Moves east along the highway lane (y = 12) towards the second-to-right boundary.
-        3. Moves north to the Highway Left lane (y = 7).
-        4. Travels west along the highway left lane to the target buffer coordinate.
-
-        Args:
-            yard_name (str): The name of the yard from which the path starts.
-            buffer_coord (Coordinate): The destination coordinate in the buffer zone.
-
-        Returns:
-            List[Coordinate]: A list of coordinates representing the path from the yard to the buffer.
-        """
         yard_out_coord = self.sector_map_snapshot.get_yard_sector(yard_name).out_coord
 
         # go to Yard[OUT] first
         path = [yard_out_coord]
+        target_x = buffer_coord.x
+        curr_y = buffer_coord.y
 
         if buffer_coord.x <= yard_out_coord.x: 
             # SCENARIO 1 : Buffer to the left of our yard. Direct Path.
@@ -468,28 +474,39 @@ class JobPlanner:
                 [Coordinate(x, highway_y) for x in range(yard_out_coord.x - 1, buffer_coord.x - 1, -1)]
             )
 
-        else : 
+            path.append(buffer_coord)
 
-            # enter highway lane, go to tile second-to-right boundary
+
+        else : # This is where we optimize 
+
+            QC_OUT_LANES = [3, 5, 8, 10, 13, 15, 18, 20, 23, 25, 28, 30, 33, 35, 38, 40]
+            highway_lane_y = 12 # Move to a Available out lane, rightward travel 
+            # 1. Find the closes available up lane to the right
+            start_x = buffer_coord.x
+            available_lanes = [x for x in QC_OUT_LANES if x > start_x]
+            turn_x = min(available_lanes) if available_lanes else 41
+
+            # Goes to turn x
             highway_lane_y = 12
-
             path.extend(
-                [Coordinate(x, highway_lane_y) for x in range(yard_out_coord.x, 42, 1)]
+                [Coordinate(x, highway_lane_y) for x in range(yard_out_coord.x, turn_x +1 , 1)]
             )
 
-            # go to Highway Left lane (7)
-            up_path_x = 41
+            # Move Upwards  
+            # # go to Highway Left lane (7)
+            up_path_x = turn_x
             path.extend([Coordinate(up_path_x, y) for y in range(11, 6, -1)])
 
-            # navigate back to original buffer
+            # -------------------------navigate back to original buffer
             highway_lane_y = 7
+
             path.extend(
-                [Coordinate(x, highway_lane_y) for x in range(40, buffer_coord.x - 1, -1)]
+                [Coordinate(x, highway_lane_y) for x in range(turn_x - 1, buffer_coord.x - 1, -1)]
             )
 
         path.append(buffer_coord)
 
-        return path
+        return path    
 
     def get_path_from_QC_to_buffer(
         self, QC_name: str, buffer_coord: Coordinate
