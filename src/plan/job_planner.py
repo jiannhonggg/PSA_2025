@@ -626,25 +626,47 @@ class JobPlanner:
         # Current position
         curr_x, curr_y = buffer_coord.x, buffer_coord.y
         qc_travel_lane_y = 4
+        qc_approach_lane_y = 5 
 
         # --- CONDITIONAL OPTIMIZATION START ---
         
+        # if QC_in_coord.x >= curr_x:
+        #     # SCENARIO: QC is to the East (Right) or aligned. TAKE THE SHORTCUT!
+            
+        #     # 1. Move vertically from the buffer spot to the QC travel lane (y=4)
+        #     step_y = 1 if qc_travel_lane_y > curr_y else -1
+        #     path.extend([Coordinate(curr_x, y) for y in range(curr_y + step_y, qc_travel_lane_y + step_y, step_y)])
+            
+        #     # 2. Travel East along the QC travel lane (y=4) directly to QC[IN]
+        #     if path:
+        #         curr_x = path[-1].x
+        #         curr_y = path[-1].y
+            
+        #     step_x = 1 if QC_in_coord.x > curr_x else -1
+        #     path.extend([Coordinate(x, curr_y) for x in range(curr_x + step_x, QC_in_coord.x + step_x, step_x)])
+
         if QC_in_coord.x >= curr_x:
             # SCENARIO: QC is to the East (Right) or aligned. TAKE THE SHORTCUT!
             
-            # 1. Move vertically from the buffer spot to the QC travel lane (y=4)
-            # We use direct coordinate generation here to match previous styles
-            step_y = 1 if qc_travel_lane_y > curr_y else -1
-            path.extend([Coordinate(curr_x, y) for y in range(curr_y + step_y, qc_travel_lane_y + step_y, step_y)])
+            # 1. Move vertically from the buffer spot down/up to the Y=5 approach lane
+            step_y = 1 if qc_approach_lane_y > curr_y else -1
+            path.extend([Coordinate(curr_x, y) for y in range(curr_y + step_y, qc_approach_lane_y + step_y, step_y)])
             
-            # 2. Travel East along the QC travel lane (y=4) directly to QC[IN]
+            # Update current Y to 5
             if path:
                 curr_x = path[-1].x
-                curr_y = path[-1].y
+                curr_y = qc_approach_lane_y
             
+            # 2. Travel EAST (Right) along the Y=5 lane until aligning with QC[IN].X
             step_x = 1 if QC_in_coord.x > curr_x else -1
             path.extend([Coordinate(x, curr_y) for x in range(curr_x + step_x, QC_in_coord.x + step_x, step_x)])
-        
+            
+            # 3. Drop down vertically one step from Y=5 to Y=4 at QC[IN].X
+            curr_x = path[-1].x
+            curr_y = path[-1].y # Should be 5
+            
+            # Move vertically down to Y=4
+            path.append(Coordinate(curr_x, qc_travel_lane_y))
         else:
             # SCENARIO: QC is to the West (Left) and requires the original down-loop.
             
@@ -887,20 +909,42 @@ class JobPlanner:
             List[Coordinate]: A list of coordinates representing the path from the QC to the buffer.
         """
         QC_out_coord = self.sector_map_snapshot.get_QC_sector(QC_name).out_coord
+        QC_out_x = QC_out_coord.x 
+        buffer_x = buffer_coord.x 
 
         # go to QC_out first
         path = [QC_out_coord]
 
+        # Current position for vertical move start
+        curr_x = QC_out_x
+        curr_y = QC_out_coord.y
+
         # go South to take QC Travel Lane all the way to right boundary
         qc_travel_lane_y = 4
-        path.append(Coordinate(QC_out_coord.x, qc_travel_lane_y))
+
+        # NEW LOGIC: If QC X coord <= Buffer X coord, use Y=5 instead of Y=4 for the detour.
+        if QC_out_x <= buffer_x:
+            qc_travel_lane_y = 5 
+        
+        # --- CONDITIONAL LANE CHOICE END ---
+        # 1. Move South/North to the chosen QC Travel Lane (Y=4 or Y=5)
+        
+        # Determine step direction (Should always be South/down since QC is usually Y<4)
+        step_y = 1 if qc_travel_lane_y > curr_y else -1 
+        
+        # Generate coordinates moving vertically from curr_y towards qc_travel_lane_y
+        path.extend([Coordinate(curr_x, y) for y in range(curr_y + step_y, qc_travel_lane_y + step_y, step_y)])
+        
+        # Update current Y for the horizontal move
+        curr_y = qc_travel_lane_y
+
         path.extend(
             [Coordinate(x, qc_travel_lane_y) for x in range(QC_out_coord.x + 1, 43, 1)]
         )
 
         # go down to Highway Left lane(7), then takes left most
         down_path_x = 42
-        path.extend([Coordinate(down_path_x, y) for y in range(5, 8, 1)])
+        path.extend([Coordinate(down_path_x, y) for y in range(qc_travel_lane_y + 1, 8, 1)])
 
         # navigate back to buffer
         highway_lane_y = 7
