@@ -24,6 +24,7 @@ notebook
 
 # Ignore env files
 venv/
+codesprint/ 
 
 # Ignore editor specific files
 .vscode/
