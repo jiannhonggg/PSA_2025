@@ -1,3 +1,5 @@
+![Alt text](images/CoverImage.png)
+
 # PSA CodeSprint 2025: Smart Port Operations – AI for Horizontal Transport Optimisation (Node)
 
 Design an AI-driven scheduling and routing strategy to minimize congestion, balance yard utilization and improve overall efficiency.
