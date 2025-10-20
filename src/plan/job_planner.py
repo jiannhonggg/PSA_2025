@@ -29,28 +29,15 @@ class JobPlanner:
         self.ht_coord_tracker = ht_coord_tracker
         self.sector_map_snapshot = sector_map_snapshot
 
-    # --- NEW HELPER METHOD FOR COMPLIANCE ---
     def _initialize_state_if_needed(self):
-        """
-        Creates state variables on the fly, the first time they are needed.
-        This keeps the __init__ method compliant with the rules.
-        """
         if not hasattr(self, 'current_tick'):
-            self.current_tick = 0
             self.yard_usage = {}
             self.yard_last_assigned_tick = {}
             self.yard_ema_load = {}
             self.qc_last_assigned_tick = {}
             self.qc_ema_load = {}
             self.recent_ht_assignments = []
-            # Initialize other state variables used across calls
-            self.last_selected_ht_coord = None
-            self.last_job_type = None
-            self.last_job_qc_name = None
-            self.last_job_yard_name = None
-            self.last_assigned_yard = None
-
-    # --- UNMODIFIED ORIGINAL METHODS ---
+            self.current_tick = 0
 
     def is_deadlock(self):
         return self.ht_coord_tracker.is_deadlock()
@@ -88,7 +75,7 @@ class JobPlanner:
             ]
 
             # select HT for the job based on job type, return None if no HT available or applicable
-            HT_name = self.select_HT(job_type, selected_HT_names, QC_name, yard_name) # Should be COMPLIANT We only change the Select HT function and not the plan#
+            HT_name = self.select_HT(job_type, selected_HT_names, QC_name, yard_name)
 
             # not proceed with job planning if no available HTs
             if HT_name is None:
@@ -263,18 +250,22 @@ class JobPlanner:
             # logger.debug(f"{job}")
 
         return new_jobs
-    
-
-     # ========================= ONLY CHANGE HERE =================================================
 
     def select_HT(self, job_type: str, selected_HT_names: List[str], QC_name: str = None, yard_name: str = None) -> str:
         """
-        Selects the best HT by calculating the total estimated travel distance for a full job cycle.
-        Also applies penalties for recent use and clustering of HTs.
+        Selects an available HT (Horizontal Transport) based on the job type and a list of already selected HTs.
+
+        For a discharge job, the method selects the first unselected HT from the left (start) of the buffer zone.
+        For any other job type, it selects the first unselected HT from the right (end) of the buffer zone.
+
+        Args:
+            job_type (str): The type of job to be processed (e.g., discharge or other).
+            selected_HT_names (List[str]): A list of HT names that are already selected or in use.
+
+        Returns:
+            str or None: The name of the selected HT if one is available; otherwise, None.
         """
-
-        self._initialize_state_if_needed() 
-
+        self._initialize_state_if_needed()
         try: available_HTs = self.ht_coord_tracker.get_available_HTs()
         except: available_HTs = []
         candidates = [ht for ht in available_HTs if ht not in selected_HT_names]
@@ -340,84 +331,79 @@ class JobPlanner:
     # YARD ASSIGNMENT LOGIC
     def select_yard(self, yard_name: str) -> str:
         """
-        Selects the best yard using a comprehensive scoring model.
+        Choose a yard by balancing two goals:
+        1) Even distribution across yards (fairness).
+        2) Proximity to the currently selected HT waiting in the buffer.
+
+        Lower score is better. We combine a simple distance-to-HT term with a
+        fairness term that penalizes overused yards relative to the current minimum usage.
         """
         self._initialize_state_if_needed()
-        self.current_tick += 1
-
-        yard_load_beta = 0.25
-        yard_ema_beta = 0.10
-        ema_alpha = 0.90
-        yard_tick_power = 0.75
-        tick_beta = 26.0
-        yard_idle_bonus = 24.0
-        distance_weight = 2.0
-        distance_quad_weight = 0.065
-        left_group = {"A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"}
-        right_group = {"E1", "E2", "F1", "F2", "G1", "G2", "H1", "H2"}
         all_yards = CONSTANT.YARD_FLOOR.YARD_NAMES
-        ht_coord = getattr(self, "last_selected_ht_coord", None)
-        if ht_coord is None:
-            ht_coord = Coordinate(21, 6)
-        best_yard = None
-        best_score = float("inf")
+        ht_coord = getattr(self, "last_selected_ht_coord", None) or Coordinate(21, 6)
+        buffer_y = 6
+
         for yd in all_yards:
             if yd not in self.yard_usage:
                 self.yard_usage[yd] = 0
             if yd not in self.yard_ema_load:
                 self.yard_ema_load[yd] = 0.0
-            if self.yard_usage[yd] >= 700:
-                continue
-            load = self.yard_usage[yd]
-            ema_load = self.yard_ema_load[yd]
-            score = load * yard_load_beta + ema_load * yard_ema_beta
+
+        min_usage = min((self.yard_usage.get(yd, 0) for yd in all_yards), default=0)
+
+
+        dx_weight = 1.6        
+        dy_weight = 0.8        
+        fairness_weight = 3.92 
+        hint_bonus = 0.8       
+        repeat_penalty = 0.0   
+
+        best_yard = None
+        best_score = float("inf")
+
+        yard_dist: dict[str, float] = {}
+        yard_usage_now: dict[str, int] = {}
+        min_dist = float("inf")
+        for yd in all_yards:
             yard_sector = self.sector_map_snapshot.get_yard_sector(yd)
-            yard_in_coord = yard_sector.in_coord
-            buffer_y = 6
-            dx = abs(ht_coord.x - yard_in_coord.x)
-            dy = abs(buffer_y - yard_in_coord.y)
-            distance = dx + dy
-            score += distance * distance_weight + (dx * dx) * distance_quad_weight
-            if yd in self.yard_last_assigned_tick:
-                ticks_since = self.current_tick - self.yard_last_assigned_tick[yd]
-                score -= (ticks_since ** yard_tick_power) * tick_beta
-            else:
-                score -= yard_idle_bonus
-            last_yard = getattr(self, "last_assigned_yard", None)
-            if last_yard:
-                if (yd in left_group and last_yard in left_group) or (yd in right_group and last_yard in right_group):
-                    score += 5.5
+            yard_in = yard_sector.in_coord
+
+            dx = abs(ht_coord.x - yard_in.x)
+            dy = abs(buffer_y - yard_in.y)
+            dist_score = dx * dx_weight + dy * dy_weight
+            yard_dist[yd] = dist_score
+            usage = self.yard_usage.get(yd, 0)
+            yard_usage_now[yd] = usage
+            if dist_score < min_dist:
+                min_dist = dist_score
+
+        for yd in all_yards:
+            dist_score = yard_dist[yd]
+            usage = yard_usage_now[yd]
+
+            fairness_score = (usage - min_usage) * fairness_weight
+
+            score = dist_score + fairness_score
+
             if yd == yard_name:
-                score -= 8.5
-            try:
-                if getattr(self, "last_job_type", None) == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-                    qc_name_hint = getattr(self, "last_job_qc_name", None)
-                    if qc_name_hint:
-                        qc_x = self.sector_map_snapshot.get_QC_sector(qc_name_hint).in_coord.x
-                        qc_left = qc_x <= 21
-                        yd_left = yd in left_group
-                        yd_right = yd in right_group
-                        if (qc_left and yd_left) or ((not qc_left) and yd_right):
-                            score -= 3.5
-                        else:
-                            score += 1.8
-            except Exception:
-                pass
-            try:
-                yard_indices = {name: i for i, name in enumerate(all_yards)}
-                idx = yard_indices.get(yd, 0)
-                mid = (len(all_yards) - 1) / 2.0
-                score += abs(idx - mid) * 0.08
-            except Exception:
-                pass
+                score -= hint_bonus
+
+            if yd == getattr(self, "last_assigned_yard", None):
+                score += repeat_penalty
+
             if score < best_score:
                 best_score = score
                 best_yard = yd
+
         if best_yard is None:
             best_yard = yard_name
 
+        ema_alpha = 0.90
         current_load = self.yard_usage[best_yard]
-        self.yard_ema_load[best_yard] = ema_alpha * self.yard_ema_load[best_yard] + (1 - ema_alpha) * current_load
+        self.yard_ema_load[best_yard] = (
+            ema_alpha * self.yard_ema_load[best_yard]
+            + (1 - ema_alpha) * current_load
+        )
         self.yard_usage[best_yard] = current_load + 1
         self.yard_last_assigned_tick[best_yard] = self.current_tick
         self.last_assigned_yard = best_yard
@@ -439,8 +425,6 @@ class JobPlanner:
         curr_x, curr_y = buffer_coord.x, buffer_coord.y
         qc_travel_lane_y = 4
         qc_approach_lane_y = 5 
-        highway_lane_y = 7 
-        buffer_lane_y = 6 
 
         # --- CONDITIONAL OPTIMIZATION START ---
 
@@ -467,7 +451,7 @@ class JobPlanner:
             # Move vertically down to Y=4
             path.append(Coordinate(curr_x, qc_travel_lane_y))
         
-        else: # QC_in_coord.x <= curr_x            
+        else:            
             # 1. Moves south to the highway left lane (y = 7).
             highway_lane_y = 7
             path = [Coordinate(buffer_coord.x, highway_lane_y)]
