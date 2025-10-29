@@ -14,7 +14,7 @@ The original planner was inefficient. It created massive bottlenecks for a few k
 ### Our Solution: A 3-Part Optimization Strategy
 
 #### 1. Smart Truck Assignments (`select_HT`)
-**Before:** The original logic was likely very simple (e.g., "pick the first available HT" or "pick the closest HT to the first stop").
+**Before:** The original logic was naive, simply picking the first available truck from the far-left (plannable_HTs[0]) for one job type or the far-right (plannable_HTs[::-1]) for the other. This had zero awareness of proximity or congestion, leading to inefficient assignments and truck "bunching."
 
 **After:** We implemented a sophisticated heuristic cost function. Instead of just looking at the first leg of the journey, our logic calculates a total cost for the entire job cycle (e.g., Buffer -> QC -> Buffer -> Yard -> Buffer).
 
@@ -25,7 +25,7 @@ The original planner was inefficient. It created massive bottlenecks for a few k
 * It adds a spread_penalty to encourage selecting HTs that are further from other already selected HTs in the same planning tick.
 
 #### 2. Dynamic Yard Load-Balancing (`select_yard`)
-**Before:** The default was probably to just use the yard_name provided by the job, leading to massive pile-ups at a single yard.
+**Before:** Before (The Baseline): This was the primary system bottleneck. The baseline function was an empty "pass-through" that did nothing (return yard_name). It simply accepted the pre-assigned yard, causing massive gridlock as all trucks piled up at a few "popular" yards while others sat empty.
 
 **After:** We implemented a load-balancing algorithm. Our logic calculates a score for all available yards based on two competing factors
 
@@ -36,9 +36,9 @@ The original planner was inefficient. It created massive bottlenecks for a few k
 #### 3. Intelligent & Adaptive Pathfinding (The "GPS")
 This was the biggest win. We completely rebuilt the port's navigation logic.
 
-**Before:** The original paths were rigid, one-way loops (e.g., always go to x=1 to travel up, always go to x=42 to travel down), which was extremely inefficient.
+**Before:** The original pathfinding was hard-coded into extremely inefficient, fixed loops. For example, get_path_from_buffer_to_yard always forced a truck to travel up to y=5, all the way right to x=42, down to y=11, all the way left to x=1, and then to the yard, regardless of where the truck and yard were. 
 
-**After:** We implemented intelligent, conditional pathfinding. We analyzed the port layout (lanes at y=4, y=5, y=7, y=12) and created custom logic that takes massive shortcuts.
+**After:** We implemented intelligent, conditional pathfinding. We analyzed the port layout (lanes at y=4, y=5, y=7, y=12) and created custom logic that finds the most direct route.
 
 * Example: In get_path_from_buffer_to_QC, if the QC was to the right of the HT (QC_in_coord.x >= curr_x), our code takes a direct shortcut by moving down to the y=5 lane and traveling directly there. The old logic would have forced the HT to travel all the way left to x=1 first, adding dozens of unnecessary steps.
 
@@ -46,7 +46,7 @@ This was the biggest win. We completely rebuilt the port's navigation logic.
 
 
 
-Overall our final solution achieved a 45.26% performance improvement over the baseline, reducing the total simulation time from 1,167,610 ticks to 639,180 ticks.
+Overall our final solution achieved a **45.26%** performance improvement over the baseline, reducing the total simulation time from **1,167,610** ticks to **639,180** ticks.
 This result was not achieved with a complex deep learning model, but through rigorous bottleneck analysis and classical algorithm design—a practical, high-performance approach that highlights several key engineering takeaways.
 
 **Key Technical Learnings:**
